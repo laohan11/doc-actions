@@ -1,0 +1,94 @@
+# 工作流名称，显示在仓库 Actions 页签的左侧列表
+name: Deploy to GitHub Pages
+
+# 每次运行的标题，方便区分是谁触发的
+run-name: ${{ github.actor }} 部署 doc-actions 🚀
+
+on:
+  # 推送到 main 分支时自动触发部署
+  push:
+    branches: [main]
+  # 允许在 Actions 页面手动点击按钮触发
+  workflow_dispatch:
+
+# 授予本次工作流所需的最小权限：
+# contents: read  -> 拉取仓库代码
+# pages: write    -> 发布 Pages
+# id-token: write -> deploy-pages 使用 OIDC 校验来源，必需
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只保留一个部署任务；新的推送不取消正在进行的部署，
+# 避免线上处于半更新状态
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  # ---------- 构建 ----------
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. 检出仓库代码到 runner
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 2. 安装 pnpm（必须在 setup-node 之前，
+      #    这样 setup-node 的 cache: pnpm 才能找到 pnpm）
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      # 3. 安装 Node，并按 pnpm-lock.yaml 缓存依赖，加快后续构建
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # 4. 严格按锁文件安装，保证线上与本地依赖版本一致
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      # 5. 打包。BASE_PATH 会被 vite.config.js 读取，
+      #    因为站点部署在 https://<user>.github.io/doc-actions/ 子路径下
+      - name: 构建
+        env:
+          BASE_PATH: /${{ github.event.repository.name }}/
+        run: pnpm build
+
+      # 6. Vue Router 使用 history 模式，直接刷新 /about 会 404。
+      #    把 index.html 复制成 404.html，让 Pages 回退到 SPA 入口
+      - name: 生成 SPA 404 回退页
+        run: cp dist/index.html dist/404.html
+
+      # 7. 关闭 Jekyll 处理，避免下划线开头的文件被忽略
+      - name: 关闭 Jekyll
+        run: touch dist/.nojekyll
+
+      # 8. 初始化 Pages 配置
+      - name: 配置 GitHub Pages
+        uses: actions/configure-pages@v5
+
+      # 9. 把 dist 目录打包成 Pages 制品，交给 deploy 任务
+      - name: 上传构建产物
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  # ---------- 部署 ----------
+  deploy:
+    # 构建成功后才部署
+    needs: build
+    runs-on: ubuntu-latest
+    # 绑定 github-pages 环境，部署完成后可在此看到线上地址
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 部署到 GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
